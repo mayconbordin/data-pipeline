@@ -1,0 +1,323 @@
+version: "3.8"
+
+x-airflow-image: &airflow_image apache/airflow:2.2.5-python3.8
+
+networks:
+  airflow:
+
+services:
+
+  api:
+    build:
+      context: ./services/flask
+    depends_on:
+      - analytics-postgres
+    environment:
+      SQLALCHEMY_DATABASE_URI: postgresql+psycopg2://analytics:analytics@analytics-postgres:5432/analytics
+    networks:
+      - default
+    ports:
+      - 50555:5000
+    volumes:
+      - ./services/flask/app:/usr/src/app/app
+    restart: always
+    networks:
+      - airflow
+
+  jupyter:
+    build:
+      context: ./services/jupyter
+    container_name: jupyter
+    environment:
+      JUPYTER_TOKEN: "default"
+    ports:
+      - "8989:8888"
+    volumes:
+      - .:/home/jovyan
+    networks:
+      - airflow
+
+# Spark =======================================================================
+  spark-master:
+    build:
+      context: ./services/spark
+    container_name: spark-master
+    ports:
+      - "8888:8080"
+      - "7077:7077"
+    environment:
+      - SPARK_MODE=master
+    networks:
+      - airflow
+
+  spark-worker:
+    build:
+      context: ./services/spark
+    container_name: spark-worker
+    depends_on:
+      - spark-master
+    ports:
+      - "8081:8081"
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+    networks:
+      - airflow
+
+# Databases ===================================================================
+  analytics-postgres:
+    image: postgis/postgis:14-3.2-alpine
+    container_name: analytics-postgres
+    environment:
+      - POSTGRES_USER=analytics
+      - POSTGRES_DB=analytics
+      - POSTGRES_PASSWORD=analytics
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    ports:
+      - 5433:5432
+    networks:
+      - airflow
+  
+  airflow-postgres:
+    image: postgres:13.1
+    container_name: airflow-postgres
+    environment:
+      - POSTGRES_USER=airflow
+      - POSTGRES_DB=airflow
+      - POSTGRES_PASSWORD=airflow
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    ports:
+      - 5432:5432
+    # volumes:
+    #   - /var/run/docker.sock:/var/run/docker.sock
+    #   - ./database/data:/var/lib/postgresql/data/pgdata
+    #   - ./database/logs:/var/lib/postgresql/data/log
+    command: >
+     postgres
+       -c listen_addresses=*
+       -c logging_collector=on
+       -c log_destination=stderr
+       -c max_connections=200
+    networks:
+      - airflow
+
+  redis:
+    image: redis:5.0.5
+    container_name: redis
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    ports:
+      - 6379:6379
+    networks:
+      - airflow
+
+# Airflow =====================================================================
+  webserver:
+    build:
+      context: ./services/airflow
+      args:
+        AIRFLOW_BASE_IMAGE: *airflow_image
+    container_name: airflow-webserver
+    env_file:
+      - .env
+    ports:
+      - 8080:8080
+    volumes:
+      - ./airflow_files/dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./files:/opt/airflow/files
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./spark/app:/usr/local/spark/app
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+    depends_on:
+      - airflow-postgres
+      - redis
+      - initdb
+    command: webserver
+    healthcheck:
+      test: ["CMD-SHELL", "[ -f /opt/airflow/airflow-webserver.pid ]"]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+    networks:
+      - airflow
+
+  flower:
+    build:
+      context: ./services/airflow
+      args:
+        AIRFLOW_BASE_IMAGE: *airflow_image
+    container_name: airflow-flower
+    env_file:
+      - .env
+    ports:
+      - 5555:5555
+    depends_on:
+      - redis
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 8s
+        max_attempts: 3
+    volumes:
+      - ./logs:/opt/airflow/logs
+    command: celery flower
+    networks:
+      - airflow
+
+  scheduler:
+    build:
+      context: ./services/airflow
+      args:
+        AIRFLOW_BASE_IMAGE: *airflow_image
+    container_name: airflow-scheduler
+    env_file:
+      - .env
+    volumes:
+      - ./airflow_files/dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./files:/opt/airflow/files
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./spark/app:/usr/local/spark/app
+    command: scheduler
+    depends_on:
+      - initdb
+    deploy:
+      restart_policy:
+        condition: any
+        delay: 5s
+        window: 120s
+    networks:
+      - airflow
+
+  worker:
+    build:
+      context: ./services/airflow
+      args:
+        AIRFLOW_BASE_IMAGE: *airflow_image
+    container_name: airflow-worker
+    env_file:
+      - .env
+    volumes:
+      - ./airflow_files/dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./files:/opt/airflow/files
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./spark/app:/usr/local/spark/app
+    command: celery worker
+    depends_on:
+      - scheduler
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 8s
+        max_attempts: 3
+    networks:
+      - airflow
+
+  initdb:
+    build:
+      context: ./services/airflow
+      args:
+        AIRFLOW_BASE_IMAGE: *airflow_image
+    env_file:
+      - .env
+    volumes:
+      - ./airflow_files/dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./files:/opt/airflow/files
+      - /var/run/docker.sock:/var/run/docker.sock
+    entrypoint: /bin/bash
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 8s
+        max_attempts: 5
+    command: -c "airflow db init && airflow users create --firstname admin --lastname admin --email admin --password admin --username admin --role Admin"
+    depends_on:
+      - redis
+      - airflow-postgres
+    networks:
+      - airflow
+
+# Airflow Connections =========================================================
+  add_connection:
+    build:
+      context: ./services/airflow
+      args:
+        AIRFLOW_BASE_IMAGE: *airflow_image
+    env_file:
+      - .env
+    depends_on:
+      - initdb
+      - webserver
+    entrypoint: /bin/bash
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 8s
+        max_attempts: 5
+    command: -c 'airflow connections add --conn-host spark://spark-master --conn-port 7077 --conn-type Spark spark_default'
+    networks:
+      - airflow
+
+  add_hdfs_connection:
+    build:
+      context: ./services/airflow
+      args:
+        AIRFLOW_BASE_IMAGE: *airflow_image
+    env_file:
+      - .env
+    depends_on:
+      - initdb
+      - webserver
+    entrypoint: /bin/bash
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 8s
+        max_attempts: 5
+    command: -c 'airflow connections add --conn-host hadoop-namenode --conn-port 8020 --conn-type hdfs hdfs_default && airflow connections add --conn-host analytics-postgres --conn-port 5432 --conn-login analytics --conn-password analytics --conn-schema analytics --conn-type postgres postgres_default'
+    networks:
+      - airflow
+
+# Hadoop ======================================================================
+  hadoop-namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: hadoop-namenode
+    environment:
+      - CLUSTER_NAME=datalake
+    env_file:
+      - ./hadoop.env
+    ports:
+      - 9870:9870
+      - 8020:8020
+      - 50070:50070
+    networks:
+      - airflow
+
+  hadoop-datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: hadoop-datanode
+    depends_on:
+      - hadoop-namenode
+    env_file:
+      - ./hadoop.env
+    networks:
+      - airflow
+
+  hadoop-datanode-init:
+    build:
+      context: ./services/hadoop
+    depends_on:
+      - hadoop-datanode
+    env_file:
+      - ./hadoop.env
+    networks:
+      - airflow

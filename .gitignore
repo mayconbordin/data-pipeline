@@ -1,0 +1,9 @@
+.cache
+.config
+.ipy*
+.jupyter
+.local
+files/
+logs/
+
+.DS_Store
