@@ -24,18 +24,18 @@ services:
     networks:
       - airflow
 
-  jupyter:
-    build:
-      context: ./services/jupyter
-    container_name: jupyter
-    environment:
-      JUPYTER_TOKEN: "default"
-    ports:
-      - "8989:8888"
-    volumes:
-      - .:/home/jovyan
-    networks:
-      - airflow
+#   jupyter:
+#     build:
+#       context: ./services/jupyter
+#     container_name: jupyter
+#     environment:
+#       JUPYTER_TOKEN: "default"
+#     ports:
+#       - "8989:8888"
+#     volumes:
+#       - .:/home/jovyan
+#     networks:
+#       - airflow
 
 # Spark =======================================================================
   spark-master:
